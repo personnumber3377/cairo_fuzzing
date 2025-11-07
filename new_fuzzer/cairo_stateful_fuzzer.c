@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <float.h>
+#include <stdio.h>
 
 static inline double pick_double(const uint8_t** in, size_t* remaining) {
     if (*remaining < 8) return 0.0;
@@ -34,10 +35,54 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
     const uint8_t* in = data;
     size_t remaining = size;
-
+    cairo_surface_t* surface = NULL;
+    /*
     cairo_surface_t* surface =
         cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 500, 500);
     cairo_t* cr = cairo_create(surface);
+    */
+
+    int type = abs((int)pick_double(&in, &remaining)) % 5;
+    fprintf(stderr, "type: %d\n", type);
+    switch (type) {
+        case 0: {
+            surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 500, 500);
+            break;
+        }
+        case 1: {
+            surface = cairo_svg_surface_create("out.svg", 500, 500);
+            break;
+        }
+        case 2: {
+            surface = cairo_pdf_surface_create("out.pdf", 500, 500);
+            break;
+        }
+        case 3: {
+            // surface = cairo_ps_surface_create("out.ps", 500, 500);
+
+            surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 500, 500);
+            
+            break;
+        }
+        case 4: {
+            cairo_rectangle_list_t *extents;
+            surface = cairo_recording_surface_create(CAIRO_CONTENT_COLOR_ALPHA, NULL);
+            break;
+        }
+    }
+
+    if (surface == NULL) {
+        return 0;
+    }
+
+    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+        // Error?
+        fprintf(stderr, "We got this error here: %s\n", cairo_status_to_string(cairo_surface_status(surface)));
+        return 0; // Error handling here...
+    }
+
+    cairo_t* cr = cairo_create(surface);
+
 
     // Paint white background so weird alpha blends show issues
     cairo_set_source_rgb(cr, 1, 1, 1);
@@ -163,18 +208,22 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
             int type = abs((int)pick_double(&in, &remaining)) % 5;
             switch (type) {
-                case 0:
+                case 0: {
                     surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 500, 500);
                     break;
-                case 1:
+                }
+                case 1: {
                     surface = cairo_svg_surface_create("out.svg", 500, 500);
                     break;
-                case 2:
+                }
+                case 2: {
                     surface = cairo_pdf_surface_create("out.pdf", 500, 500);
                     break;
-                case 3:
+                }
+                case 3: {
                     surface = cairo_ps_surface_create("out.ps", 500, 500);
                     break;
+                }
                 case 4: {
                     cairo_rectangle_list_t *extents;
                     surface = cairo_recording_surface_create(CAIRO_CONTENT_COLOR_ALPHA, NULL);
