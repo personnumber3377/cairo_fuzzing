@@ -144,7 +144,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
     while (remaining > 0 && ops++ < max_ops) {
         //uint8_t op = *in++ % 20;      // expanded 0..19
-        uint8_t op = *in++ % 30;
+        uint8_t op = *in++ % 31;
         remaining--;
 
         switch (op) {
@@ -375,57 +375,55 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             break;
         }
 
-        case 17: {
+        case 17: { /* FULL MESH RASTER TEST */
             cairo_pattern_t *mesh = cairo_pattern_create_mesh();
             if (!mesh) break;
 
-            int patches = (abs(pick_int(&in,&remaining)) % 3) + 1;   // 1-3 patches
+            int patches = (abs(pick_int(&in,&remaining)) % 25) + 5;  // 5–30 patches
 
             for (int p = 0; p < patches && remaining > 0; p++) {
-
                 cairo_mesh_pattern_begin_patch(mesh);
 
-                // random starting point
+                /* Starting point */
                 cairo_mesh_pattern_move_to(mesh,
                     pick_double_extreme(&in,&remaining),
                     pick_double_extreme(&in,&remaining));
 
-                // add 3–6 curve segments
-                int curves = (abs(pick_int(&in,&remaining)) % 4) + 3;
-                for (int i=0; i < curves; i++) {
+                /* Add 0–6 curves (0 = degenerate --> triggers weird raster paths) */
+                int curves = abs(pick_int(&in,&remaining)) % 7;
+                for (int i=0; i < curves; i++)
                     cairo_mesh_pattern_curve_to(mesh,
-                        pick_double_extreme(&in,&remaining), pick_double_extreme(&in,&remaining),
-                        pick_double_extreme(&in,&remaining), pick_double_extreme(&in,&remaining),
-                        pick_double_extreme(&in,&remaining), pick_double_extreme(&in,&remaining));
-                }
+                        pick_double_extreme(&in,&remaining),
+                        pick_double_extreme(&in,&remaining),
+                        pick_double_extreme(&in,&remaining),
+                        pick_double_extreme(&in,&remaining),
+                        pick_double_extreme(&in,&remaining),
+                        pick_double_extreme(&in,&remaining));
 
-                // set corner colors
-                for (int corner=0; corner < 4; corner++) {
-                    if (pick_int(&in,&remaining) & 1)
-                        cairo_mesh_pattern_set_corner_color_rgb(mesh,
-                            corner,
-                            fabs(pick_double(&in,&remaining)),
-                            fabs(pick_double(&in,&remaining)),
-                            fabs(pick_double(&in,&remaining)));
-                    else
-                        cairo_mesh_pattern_set_corner_color_rgba(mesh,
-                            corner,
-                            fabs(pick_double(&in,&remaining)),
-                            fabs(pick_double(&in,&remaining)),
-                            fabs(pick_double(&in,&remaining)),
-                            fabs(pick_double(&in,&remaining)));
-                }
+                /* corner colors */
+                for (int corner = 0; corner < 4; corner++)
+                    cairo_mesh_pattern_set_corner_color_rgba(mesh,
+                        corner,
+                        fabs(pick_double(&in,&remaining)),
+                        fabs(pick_double(&in,&remaining)),
+                        fabs(pick_double(&in,&remaining)),
+                        fabs(pick_double(&in,&remaining)));
 
                 cairo_mesh_pattern_end_patch(mesh);
             }
 
-            // optionally set as source and draw
-            if (cairo_pattern_status(mesh) == CAIRO_STATUS_SUCCESS &&
-                (pick_int(&in,&remaining) & 1))
-            {
-                cairo_set_source(cr, mesh);
-                cairo_paint(cr);
-            }
+            /* ---- FORCE RASTERIZATION ---- */
+            cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 64, 64);
+            cairo_t *tmp = cairo_create(img);
+
+            cairo_set_operator(tmp, (cairo_operator_t)(abs(pick_int(&in,&remaining)) % 18));
+            cairo_set_source(tmp, mesh);
+
+            /* triggers rasterizer */
+            cairo_paint_with_alpha(tmp, fabs(pick_double(&in,&remaining)));
+
+            cairo_destroy(tmp);
+            cairo_surface_destroy(img);
 
             cairo_pattern_destroy(mesh);
             break;
@@ -557,6 +555,33 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             cairo_set_operator(cr,
                 (cairo_operator_t)(abs(pick_int(&in,&remaining)) % 18)); // uses *all* blend modes
             break;
+
+        case 30: { /* region fuzzing -> hits cairo-boxes-intersect.c */
+            cairo_region_t *r1 = cairo_region_create();
+            cairo_region_t *r2 = cairo_region_create();
+
+            for (int i = 0; i < 8 && remaining > 0; i++) {
+                cairo_rectangle_int_t rect = {
+                    pick_int(&in,&remaining) % 500,
+                    pick_int(&in,&remaining) % 500,
+                    (pick_int(&in,&remaining) % 200) + 1,
+                    (pick_int(&in,&remaining) % 200) + 1
+                };
+                cairo_region_union_rectangle(r1, &rect);
+                cairo_region_union_rectangle(r2, &rect);
+            }
+
+            switch (abs(pick_int(&in,&remaining)) % 4) {
+                case 0: cairo_region_intersect(r1, r2); break;
+                case 1: cairo_region_xor(r1, r2); break;
+                case 2: cairo_region_subtract(r1, r2); break;
+                default: cairo_region_union(r1, r2); break;
+            }
+
+            cairo_region_destroy(r1);
+            cairo_region_destroy(r2);
+            break;
+        }
 
         } /* switch op */
 
