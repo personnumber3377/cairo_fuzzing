@@ -8,6 +8,17 @@
 #include <float.h>
 #include <stdio.h>
 
+// Fuzz parameters...
+
+#define MAX_PATCHES 1000
+#define MIN_PATCHES 5
+
+#define MIN_CURVES 10
+#define MAX_CURVES 1000
+
+// CAIRO_OPERATOR_HSL_LUMINOSITY is the last one in the enum...
+#define MAX_CAIRO_OPERATOR 29
+
 static inline double clamp_dim(double v) {
     if (!isfinite(v)) return 500.0;
     if (v < 1.0) return 1.0;
@@ -379,7 +390,9 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             cairo_pattern_t *mesh = cairo_pattern_create_mesh();
             if (!mesh) break;
 
-            int patches = (abs(pick_int(&in,&remaining)) % 25) + 5;  // 5–30 patches
+            // int patches = (abs(pick_int(&in,&remaining)) % 25) + 5;  // 5–30 patches
+
+            int patches = (abs(pick_int(&in,&remaining)) % (MAX_PATCHES + 1)) + MIN_PATCHES;
 
             for (int p = 0; p < patches && remaining > 0; p++) {
                 cairo_mesh_pattern_begin_patch(mesh);
@@ -390,7 +403,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
                     pick_double_extreme(&in,&remaining));
 
                 /* Add 0–6 curves (0 = degenerate --> triggers weird raster paths) */
-                int curves = abs(pick_int(&in,&remaining)) % 7;
+                int curves = abs(pick_int(&in,&remaining)) % (MAX_CURVES + 1);
                 for (int i=0; i < curves; i++)
                     cairo_mesh_pattern_curve_to(mesh,
                         pick_double_extreme(&in,&remaining),
@@ -416,7 +429,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 64, 64);
             cairo_t *tmp = cairo_create(img);
 
-            cairo_set_operator(tmp, (cairo_operator_t)(abs(pick_int(&in,&remaining)) % 18));
+            cairo_set_operator(tmp, (cairo_operator_t)(abs(pick_int(&in,&remaining)) % (MAX_CAIRO_OPERATOR + 1)));
             cairo_set_source(tmp, mesh);
 
             /* triggers rasterizer */
@@ -553,7 +566,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
         case 29: /* heavy operator stress */
             cairo_set_operator(cr,
-                (cairo_operator_t)(abs(pick_int(&in,&remaining)) % 18)); // uses *all* blend modes
+                (cairo_operator_t)(abs(pick_int(&in,&remaining)) % (MAX_CAIRO_OPERATOR))); // uses *all* blend modes
             break;
 
         case 30: { /* region fuzzing -> hits cairo-boxes-intersect.c */
