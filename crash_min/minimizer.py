@@ -34,6 +34,7 @@ def minimize(data, exe):
     """Delta-debug minimizing loop."""
     print(f"[+] Starting size: {len(data)} bytes")
 
+    '''
     changed = True
     while changed:
         changed = False
@@ -50,6 +51,8 @@ def minimize(data, exe):
                 if causes_crash(exe, candidate):
                     print(f"[+] Reduced to {len(candidate)} bytes (removed chunk @ {i}:{i+step})")
                     data = candidate
+                    with open("candidate.bin", "wb") as out:
+                        out.write(candidate)
                     changed = True
                     break
                 i += step
@@ -57,7 +60,8 @@ def minimize(data, exe):
             if changed:
                 break
             step //= 2
-
+    '''
+    
     # Fine-grained byte deletion pass
     print("[*] Byte-by-byte shrinking...")
     i = 0
