@@ -7,6 +7,17 @@
 #include <string.h>
 #include <float.h>
 #include <stdio.h>
+#include <signal.h>
+#include <setjmp.h>
+static sigjmp_buf escape;
+
+static void alarm_handler(int sig) {
+    siglongjmp(escape, 1);
+}
+
+#ifdef COVERAGE_BUILD
+char* current_file = NULL; // Global pointer to the current file being processed
+#endif
 
 // Fuzz parameters...
 
@@ -121,6 +132,38 @@ static cairo_surface_t* make_small_image_surface(void) {
     return s;
 }
 
+/* put near your helpers (no new headers required) */
+static inline void fill_image_with_fuzz(cairo_surface_t *img,
+                                       const uint8_t **in, size_t *remaining) {
+    if (!img) return;
+    if (cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) return;
+    unsigned char *data = cairo_image_surface_get_data(img);
+    if (!data) return;
+    int width = cairo_image_surface_get_width(img);
+    int height = cairo_image_surface_get_height(img);
+    int stride = cairo_image_surface_get_stride(img);
+    /* total bytes we can write */
+    size_t capacity = (size_t)stride * (size_t)height;
+    /* don't read more than remaining */
+    size_t to_write = (*remaining < capacity) ? *remaining : capacity;
+    if (to_write == 0) return;
+
+    /* copy at most capacity bytes; fill the rest with a pattern so the rasterizer
+       sees varied content */
+    memcpy(data, *in, to_write);
+    if (to_write < capacity) {
+        /* optional deterministic fill for the leftover */
+        for (size_t i = to_write; i < capacity; i++) data[i] = (unsigned char)(i & 0xFF);
+    }
+
+    /* mark dirty so Cairo knows */
+    cairo_surface_mark_dirty(img);
+
+    /* consume input bytes */
+    *in += to_write;
+    *remaining -= to_write;
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     if (size < 1) return 0;
 
@@ -153,9 +196,13 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     size_t max_ops = 2000;
     size_t ops = 0;
 
+#ifdef COVERAGE_BUILD
+    fprintf(stderr, "Poopoo: %s\n", current_file);
+#endif
+
     while (remaining > 0 && ops++ < max_ops) {
         //uint8_t op = *in++ % 20;      // expanded 0..19
-        uint8_t op = *in++ % 31;
+        uint8_t op = *in++ % 51;
         remaining--;
 
         switch (op) {
@@ -596,17 +643,279 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             break;
         }
 
-        } /* switch op */
+        case 31: /* ATOMIC: push_group only (no drawing here) */
+            cairo_push_group(cr);
+            break;
 
+        case 32: /* ATOMIC: pop_group_to_source only */
+            cairo_pop_group_to_source(cr);
+            cairo_paint_with_alpha(cr, fabs(pick_double(&in,&remaining)));
+            break;
+
+        case 33: /* ATOMIC: set_antialias */
+            cairo_set_antialias(cr, (cairo_antialias_t)(abs(pick_int(&in,&remaining)) % 5));
+            break;
+
+        case 34: /* ATOMIC: set operator (standalone) */
+            cairo_set_operator(cr, (cairo_operator_t)(abs(pick_int(&in,&remaining)) % (MAX_CAIRO_OPERATOR+1)));
+            break;
+
+        case 35: /* CLIP + RESET CLIP explicitly */
+            cairo_rectangle(cr,
+                pick_double_extreme(&in,&remaining),
+                pick_double_extreme(&in,&remaining),
+                pick_double_extreme(&in,&remaining),
+                pick_double_extreme(&in,&remaining));
+            cairo_clip(cr);
+            if (pick_int(&in,&remaining) & 1)
+                cairo_reset_clip(cr);
+            break;
+
+        case 36: /* HARD CODED TEXT PATTERN — always uses valid font */
+        {
+            cairo_select_font_face(cr,
+                "Sans",                                // reliable font
+                CAIRO_FONT_SLANT_NORMAL,
+                CAIRO_FONT_WEIGHT_BOLD);
+
+            cairo_set_font_size(cr, (fabs(pick_double_extreme(&in,&remaining)) + 1.0) * 12.0);
+
+            cairo_move_to(cr,
+                pick_double_extreme(&in,&remaining),
+                pick_double_extreme(&in,&remaining));
+
+            static const char *words[] = {
+                "cairo", "SVG", "RGBA", "mesh", "recording"
+            };
+            cairo_show_text(cr, words[abs(pick_int(&in,&remaining)) % 5]);
+            break;
+        }
+
+        case 37: /* ATOMIC: stroke_preserve + fill */
+            cairo_stroke_preserve(cr);
+            cairo_fill(cr);
+            break;
+
+        case 38: /* ATOMIC: mask with randomly constructed pattern */
+        {
+            cairo_surface_t *img = make_small_image_surface();
+            if (img) {
+                cairo_pattern_t *p = cairo_pattern_create_for_surface(img);
+                cairo_mask(cr, p);
+                cairo_pattern_destroy(p);
+                cairo_surface_destroy(img);
+            }
+            break;
+        }
+
+        case 39: /* set matrix directly (CTM fuzz) */
+        {
+            cairo_matrix_t m = rand_matrix(&in, &remaining);
+            cairo_set_matrix(cr, &m);
+            break;
+        }
+
+        case 40: /* get matrix + invert it */
+        {
+            cairo_matrix_t m;
+            cairo_get_matrix(cr, &m);
+            cairo_matrix_invert(&m);  // sometimes returns failure but Cairo doesn't care
+            cairo_set_matrix(cr, &m);
+            break;
+        }
+
+        case 41: /* new_path only */
+            cairo_new_path(cr);
+            break;
+
+        case 42: /* new_sub_path */
+            cairo_new_sub_path(cr);
+            break;
+
+        case 43: /* fill_extents (does not modify state - great coverage) */
+        {
+            double x1,y1,x2,y2;
+            cairo_fill_extents(cr, &x1,&y1,&x2,&y2);
+            break;
+        }
+
+        case 44: /* stroke_extents */
+        {
+            double x1,y1,x2,y2;
+            cairo_stroke_extents(cr, &x1,&y1,&x2,&y2);
+            break;
+        }
+
+        case 45: /* ATOMIC: set tolerance (affects flattening/tessellation) */
+            cairo_set_tolerance(cr, fabs(pick_double_extreme(&in,&remaining)) + 1e-6);
+            break;
+
+        case 46: /* ATOMIC: cairo_paint() */
+            cairo_paint(cr);
+            break;
+
+        case 47: /* CAIRO HINTING COMBO (inspired by bug #61592) */
+        {
+            cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
+            cairo_move_to(cr, pick_double(&in,&remaining), pick_double(&in,&remaining));
+            cairo_line_to(cr, pick_double(&in,&remaining), pick_double(&in,&remaining));
+            cairo_clip(cr);
+
+            cairo_set_antialias(cr, CAIRO_ANTIALIAS_DEFAULT);
+            cairo_move_to(cr, pick_double(&in,&remaining), pick_double(&in,&remaining));
+            cairo_line_to(cr, pick_double(&in,&remaining), pick_double(&in,&remaining));
+            cairo_clip(cr);
+            break;
+        }
+
+        case 48: /* CAIRO FONT EXTENTS (touches font code paths without drawing) */
+        {
+            cairo_font_extents_t fe;
+            cairo_font_extents(cr, &fe);
+            break;
+        }
+
+        case 49: /* CAIRO TEXT EXTENTS */
+        {
+            cairo_text_extents_t te;
+            cairo_text_extents(cr, "cairo", &te);
+            break;
+        }
+
+
+        case 50: { /* HEAVY: Fuzz image surfaces / raster-like code paths (map data -> pattern -> paint) */
+            /* pick a small-ish but variable size; keep it reasonable to avoid OOM */
+            int w = (abs(pick_int(&in,&remaining)) % 256) + 1;   /* 1..256 */
+            int h = (abs(pick_int(&in,&remaining)) % 256) + 1;   /* 1..256 */
+
+            /* try different formats */
+            int fmt_sel = abs(pick_int(&in,&remaining)) % 3;
+            cairo_format_t fmt = CAIRO_FORMAT_ARGB32;
+            if (fmt_sel == 1) fmt = CAIRO_FORMAT_RGB24;
+            else if (fmt_sel == 2) fmt = CAIRO_FORMAT_A8;
+
+            /* create image surface */
+            cairo_surface_t *img = cairo_image_surface_create(fmt, w, h);
+            if (img && cairo_surface_status(img) == CAIRO_STATUS_SUCCESS) {
+                /* fill the pixels with fuzz bytes (safe: respects stride/height) */
+                fill_image_with_fuzz(img, &in, &remaining);
+
+                /* create a similar surface (exercises create_similar_image) */
+                cairo_surface_t *sim = cairo_surface_create_similar_image(img, fmt,
+                                                                          (w > 16 ? w/2 : w),
+                                                                          (h > 16 ? h/2 : h/2));
+                if (sim && cairo_surface_status(sim) == CAIRO_STATUS_SUCCESS) {
+                    fill_image_with_fuzz(sim, &in, &remaining);
+                    cairo_surface_destroy(sim);
+                }
+
+                /* create pattern for the surface and try various pattern ops */
+                cairo_pattern_t *ps = cairo_pattern_create_for_surface(img);
+                if (ps) {
+                    /* random matrix + extend + filter to exercise getters/setters */
+                    cairo_matrix_t mm = rand_matrix(&in, &remaining);
+                    cairo_pattern_set_matrix(ps, &mm);
+                    cairo_pattern_set_extend(ps, (cairo_extend_t)(abs(pick_int(&in,&remaining)) % 4));
+                    cairo_pattern_set_filter(ps, (cairo_filter_t)(abs(pick_int(&in,&remaining)) % 4));
+                    cairo_pattern_get_filter(ps);
+                    cairo_pattern_get_extend(ps);
+
+                    /* set as source directly and draw */
+                    safe_set_source(cr, cairo_pattern_reference(ps));
+                    cairo_paint_with_alpha(cr, fabs(pick_double(&in,&remaining)));
+
+                    /* try set_source_surface as well */
+                    cairo_set_source_surface(cr, img,
+                        pick_double_extreme(&in,&remaining),
+                        pick_double_extreme(&in,&remaining));
+                    cairo_paint_with_alpha(cr, fabs(pick_double(&in,&remaining)));
+
+                    cairo_pattern_destroy(ps);
+                }
+
+                /* sometimes map the surface -> call APIs that read/write raw data */
+                if (pick_int(&in,&remaining) & 1) {
+                    /* retrieving data/pointers again is harmless even if already done */
+                    unsigned char *d = cairo_image_surface_get_data(img);
+                    (void)d;
+                    /* mark dirty rectangle randomly */
+                    /*
+                    cairo_surface_mark_dirty_rectangle(img,
+                        pick_int(&in,&remaining) % (w>0?w:1),
+                        pick_int(&in,&remaining) % (h>0?h:1),
+                        (abs(pick_int(&in,&remaining)) % (w>0?w:1)) + 1,
+                        (abs(pick_int(&in,&remaining)) % (h>0?h:1)) + 1);
+                    */
+
+                }
+
+                cairo_surface_destroy(img);
+            } else {
+                if (img) cairo_surface_destroy(img);
+            }
+            break;
+        }
+
+
+
+
+
+
+        }
+        /* switch op */
+
+        /*
         if ((ops % 11) == 0) cairo_new_path(cr);
         if ((ops % 17) == 0) { cairo_save(cr); cairo_restore(cr); }
         if ((ops % 29) == 0) cairo_identity_matrix(cr);
+        */
+
         /*
         if (cairo_status(cr) != CAIRO_STATUS_SUCCESS)
             break;
         */
         
     }
+
+
+#ifdef COVERAGE_BUILD
+
+    fprintf(stderr, "Trying this file here: %s\n", current_file);
+    {
+        /* use the same logical extents you constructed earlier (w/h) */
+        int iw = (int)ceil(w);
+        int ih = (int)ceil(h);
+
+        /* create an image surface to rasterize the recording surface onto */
+        cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw, ih);
+        if (img && cairo_surface_status(img) == CAIRO_STATUS_SUCCESS) {
+            cairo_t *out = cairo_create(img);
+            if (out && cairo_status(out) == CAIRO_STATUS_SUCCESS) {
+                /* paint the recording surface onto the image */
+                cairo_set_source_surface(out, surface, 0.0, 0.0);
+                cairo_paint(out);
+
+                /* flush & write to a reasonably-unique filename */
+                cairo_surface_flush(img);
+                char fname[256];
+                snprintf(fname, sizeof(fname),
+                         "cairo_out/cairo_fuzz_out_%d_%ld.png",
+                         (int)getpid(), (long)rand());
+                /* ignore return value but you can check it if you want */
+                cairo_surface_write_to_png(img, fname);
+
+                /* clean up */
+                cairo_destroy(out);
+            } else {
+                if (out) cairo_destroy(out);
+            }
+            cairo_surface_destroy(img);
+        } else {
+            if (img) cairo_surface_destroy(img);
+        }
+    }
+
+#endif
 
     cairo_destroy(cr);
     cairo_surface_destroy(surface);
@@ -624,7 +933,29 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 #include <fcntl.h>
 #include <limits.h>
 
+void save_input(char* buffer, int len) {
+    // Do the stuff...
+    FILE* fp;
+    fp = fopen("cur_input.bin", "wb");
+    fwrite(buffer, 1, len, fp);
+    fclose(fp);
+    return;
+}
+
 static int process_file(const char *path) {
+
+    // Install a timeout (2 seconds for coverage scans)
+    signal(SIGALRM, alarm_handler);
+    alarm(2);           // <-- adjust time if needed
+
+    if (sigsetjmp(escape, 1)) {
+        fprintf(stderr, "[!] Timeout on file %s — skipping\n", path);
+        alarm(0);
+        return 0;
+    }
+
+
+    current_file = path; // Set the pointer thing...
     int fd = open(path, O_RDONLY);
     if (fd < 0) { perror("open"); return -1; }
     struct stat st;
@@ -647,8 +978,11 @@ static int process_file(const char *path) {
         if (r == 0) break;
         off += r;
     }
+    save_input(buf, off); // Do the stuff...
     LLVMFuzzerTestOneInput(buf, (size_t)off);
-    free(buf); close(fd); return 0;
+    free(buf); close(fd);
+    alarm(0);
+    return 0;
 }
 
 static int process_directory(const char *dirpath) {
@@ -669,8 +1003,9 @@ static int process_directory(const char *dirpath) {
 }
 
 int main(int argc, char **argv) {
+    srand(time(NULL));
     if (argc < 2) {
-        uint8_t buf[4096];
+        uint8_t buf[60000];
         ssize_t len = read(STDIN_FILENO, buf, sizeof(buf));
         if (len > 0) LLVMFuzzerTestOneInput(buf, (size_t)len);
         return 0;
