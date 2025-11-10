@@ -2,4 +2,5 @@
 https://gitlab.freedesktop.org/cairo/cairo/-/issues/913
 https://gitlab.freedesktop.org/cairo/cairo/-/issues/914
 https://gitlab.freedesktop.org/cairo/cairo/-/issues/915
+https://gitlab.freedesktop.org/cairo/cairo/-/issues/916
 
