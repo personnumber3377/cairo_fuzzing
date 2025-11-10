@@ -28,7 +28,7 @@ char* current_file = NULL; // Global pointer to the current file being processed
 #define MAX_CURVES 1000
 
 // CAIRO_OPERATOR_HSL_LUMINOSITY is the last one in the enum...
-#define MAX_CAIRO_OPERATOR 29
+#define MAX_CAIRO_OPERATOR 28
 
 static inline double clamp_dim(double v) {
     if (!isfinite(v)) return 500.0;
@@ -195,10 +195,6 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
     size_t max_ops = 2000;
     size_t ops = 0;
-
-#ifdef COVERAGE_BUILD
-    fprintf(stderr, "Poopoo: %s\n", current_file);
-#endif
 
     while (remaining > 0 && ops++ < max_ops) {
         //uint8_t op = *in++ % 20;      // expanded 0..19
