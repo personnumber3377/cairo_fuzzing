@@ -201,6 +201,10 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         uint8_t op = *in++ % 51;
         remaining--;
 
+#ifdef COVERAGE_BUILD
+        fprintf(stderr, "Current operation: %d\n", op);
+#endif
+
         switch (op) {
         case 0:
             cairo_move_to(cr, pick_double_extreme(&in,&remaining), pick_double_extreme(&in,&remaining));
