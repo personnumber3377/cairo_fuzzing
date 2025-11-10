@@ -61,12 +61,13 @@ def minimize(data, exe):
                 break
             step //= 2
     '''
-    
+
     # Fine-grained byte deletion pass
     print("[*] Byte-by-byte shrinking...")
     i = 0
-    while i < len(data):
-        candidate = data[:i] + data[i+1:]
+    thing = 3
+    while i < len(data) - thing:
+        candidate = data[:i] + data[i+thing:]
         if causes_crash(exe, candidate):
             print(f"[+] Removed byte @ {i}, new size {len(candidate)}")
             data = candidate
