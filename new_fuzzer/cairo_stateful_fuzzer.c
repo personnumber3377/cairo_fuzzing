@@ -19,6 +19,21 @@ static void alarm_handler(int sig) {
 char* current_file = NULL; // Global pointer to the current file being processed
 #endif
 
+#ifdef DEBUG_OPS
+#  define DEBUG(op, fmt, ...) \
+      fprintf(stderr, "[OP %02d] " fmt "\n", (op), ##__VA_ARGS__)
+#else
+#  define DEBUG(op, fmt, ...) do{}while(0)
+#endif
+
+
+#ifdef DEBUG_OPS
+#  define DEBUG_OP(op, fmt, ...) \
+      fprintf(stderr, "[OP %02d] " fmt "\n", (op), ##__VA_ARGS__)
+#else
+#  define DEBUG_OP(op, fmt, ...) do{}while(0)
+#endif
+
 // Fuzz parameters...
 
 #define MAX_PATCHES 1000
@@ -88,6 +103,41 @@ static inline char* pick_string(const uint8_t **in, size_t *remaining) {
     *remaining -= len;
     return s;
 }
+
+
+
+// These are needed for the newer parts..
+
+static inline double read_double(const uint8_t *data, size_t size, size_t pos) {
+    if (pos + sizeof(uint64_t) > size) return 0.0;
+    uint64_t bits;
+    memcpy(&bits, data + pos, sizeof(bits));
+    pos += sizeof(bits);
+    return (double)((int64_t)bits) / (double)INT64_MAX; // Normalize
+}
+
+static inline float read_float(const uint8_t *data, size_t size, size_t pos) {
+    if (pos + sizeof(uint32_t) > size) return 0.0f;
+    uint32_t bits;
+    memcpy(&bits, data + pos, sizeof(bits));
+    pos += sizeof(bits);
+    return (float)((int32_t)bits) / (float)INT32_MAX;
+}
+
+static inline char *read_string(const uint8_t *data, size_t size, size_t pos, size_t maxlen) {
+    if (pos >= size) return strdup("");
+
+    size_t len = data[pos++] % maxlen;
+    if (pos + len > size) len = size - pos;
+
+    char *s = malloc(len + 1);
+    memcpy(s, data + pos, len);
+    s[len] = '\0';
+    pos += len;
+    return s;
+}
+
+
 
 static inline void safe_set_source(cairo_t *cr, cairo_pattern_t *p) {
     if (!p) return;
@@ -164,6 +214,51 @@ static inline void fill_image_with_fuzz(cairo_surface_t *img,
     *remaining -= to_write;
 }
 
+
+static cairo_glyph_t *make_glyphs(const uint8_t *data, size_t size, size_t pos, int *num_glyphs) {
+    *num_glyphs = (pos < size) ? (data[pos++] % 10) : 0;  // up to 10 glyphs
+
+    cairo_glyph_t *glyphs = calloc(*num_glyphs, sizeof(cairo_glyph_t));
+    for (int i = 0; i < *num_glyphs; i++) {
+        glyphs[i].index = (pos < size) ? data[pos++] : 0;
+        glyphs[i].x = read_double(data, size, pos);
+        glyphs[i].y = read_double(data, size, pos);
+    }
+    return glyphs;
+}
+
+static cairo_text_cluster_t *make_clusters(const uint8_t *data, size_t size, size_t pos, int *num_clusters) {
+    *num_clusters = (pos < size) ? (data[pos++] % 4) : 0;
+
+    cairo_text_cluster_t *clusters = calloc(*num_clusters, sizeof(cairo_text_cluster_t));
+    for (int i = 0; i < *num_clusters; i++) {
+        clusters[i].num_bytes = (pos < size) ? (data[pos++] % 4) : 0;
+        clusters[i].num_glyphs = (pos < size) ? (data[pos++] % 4) : 0;
+    }
+    return clusters;
+}
+
+static void read_matrix(cairo_matrix_t *m, const uint8_t *data, size_t size, size_t pos) {
+    m->xx = read_double(data, size, pos);
+    m->xy = read_double(data, size, pos);
+    m->yx = read_double(data, size, pos);
+    m->yy = read_double(data, size, pos);
+    m->x0 = read_double(data, size, pos);
+    m->y0 = read_double(data, size, pos);
+}
+
+
+static cairo_font_face_t *make_font_face(const uint8_t *data, size_t size, size_t pos) {
+    static const char *families[] = {"sans", "serif", "monospace"};
+    const char *family = families[ (pos < size) ? data[pos++] % 3 : 0 ];
+
+    cairo_font_slant_t slant = (pos < size) ? data[pos++] % 3 : CAIRO_FONT_SLANT_NORMAL;
+    cairo_font_weight_t weight = (pos < size) ? data[pos++] % 2 : CAIRO_FONT_WEIGHT_NORMAL;
+
+    return cairo_toy_font_face_create(family, slant, weight);
+}
+
+
 int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     if (size < 1) return 0;
 
@@ -195,20 +290,30 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
     size_t max_ops = 2000;
     size_t ops = 0;
-
+    size_t pos = 0;
     while (remaining > 0 && ops++ < max_ops) {
         //uint8_t op = *in++ % 20;      // expanded 0..19
-        uint8_t op = *in++ % 51;
+        uint8_t op = *in++ % 61; //% 51;
         remaining--;
+        pos++;
 
 #ifdef COVERAGE_BUILD
         fprintf(stderr, "Current operation: %d\n", op);
 #endif
 
-        switch (op) {
-        case 0:
+        /*
             cairo_move_to(cr, pick_double_extreme(&in,&remaining), pick_double_extreme(&in,&remaining));
             break;
+            */
+
+        switch (op) {
+        case 0: {
+            double x = pick_double_extreme(&in,&remaining);
+            double y = pick_double_extreme(&in,&remaining);
+            DEBUG_OP(op, "move_to(%f, %f)", x, y);
+            cairo_move_to(cr, x, y);
+            break;
+        }
         case 1:
             cairo_line_to(cr, pick_double_extreme(&in,&remaining), pick_double_extreme(&in,&remaining));
             break;
@@ -219,11 +324,23 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
                 pick_double_extreme(&in,&remaining), pick_double_extreme(&in,&remaining));
             break;
         case 3: {
+            /*
             int dash_count = (abs(pick_int(&in,&remaining)) % 8) + 1;
             double dashes[8];
             for (int i=0;i<dash_count;i++) dashes[i] = fabs(pick_double_extreme(&in,&remaining));
             cairo_set_dash(cr, dashes, dash_count, pick_double_extreme(&in,&remaining));
             break;
+            */
+
+            int dash_count = (abs(pick_int(&in,&remaining)) % 8) + 1;
+            double dashes[8];
+            for (int i=0;i<dash_count;i++)
+                dashes[i] = fabs(pick_double_extreme(&in,&remaining));
+            double off = pick_double_extreme(&in,&remaining);
+            DEBUG_OP(op, "set_dash(count=%d, offset=%f)", dash_count, off);
+            cairo_set_dash(cr, dashes, dash_count, off);
+            break;
+
         }
         case 4:
             cairo_arc(cr,
@@ -291,6 +408,18 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             break;
         }
         case 13: {
+            double x = pick_double_extreme(&in,&remaining);
+            double y = pick_double_extreme(&in,&remaining);
+            double w = pick_double_extreme(&in,&remaining);
+            double h = pick_double_extreme(&in,&remaining);
+            DEBUG_OP(op, "clip rectangle (%f,%f %f×%f)", x,y,w,h);
+            cairo_save(cr);
+            cairo_rectangle(cr,x,y,w,h);
+            cairo_clip(cr);
+            if ((ops % 7) == 0) cairo_reset_clip(cr);
+            cairo_restore(cr);
+            break;
+            /*
             cairo_save(cr);
             cairo_rectangle(cr,
                 pick_double_extreme(&in,&remaining), pick_double_extreme(&in,&remaining),
@@ -299,8 +428,11 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             if ((ops % 7) == 0) cairo_reset_clip(cr);
             cairo_restore(cr);
             break;
+            */
+
         }
         case 14: {
+            /*
             char *s = pick_string(&in,&remaining);
             cairo_select_font_face(cr,
                 s,
@@ -319,6 +451,31 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             }
             free(s);
             break;
+            */
+
+            char *s = pick_string(&in,&remaining);
+            int slant = abs(pick_int(&in,&remaining)) % 3;
+            int weight = abs(pick_int(&in,&remaining)) % 2;
+            double size = clamp_pos(fabs(pick_double_extreme(&in,&remaining)) * 50.0, 1.0);
+
+            DEBUG_OP(op, "text '%s' size=%f slant=%d weight=%d", s,size,slant,weight);
+
+            cairo_select_font_face(cr, s, slant, weight);
+            cairo_set_font_size(cr,size);
+
+            double x = pick_double_extreme(&in,&remaining);
+            double y = pick_double_extreme(&in,&remaining);
+            cairo_move_to(cr,x,y);
+
+            if (pick_int(&in,&remaining) & 1)
+                cairo_show_text(cr,s);
+            else {
+                cairo_text_path(cr,s);
+                cairo_fill(cr);
+            }
+            free(s);
+            break;
+
         }
         case 15: {
             cairo_font_options_t *opts = cairo_font_options_create();
@@ -557,6 +714,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         }
 
         case 23: /* path close + random stroke/fill */
+            DEBUG_OP(op, "close_path + fill/stroke");
             cairo_close_path(cr);
             if (pick_int(&in,&remaining) & 1)
                 cairo_fill_preserve(cr);
@@ -644,10 +802,12 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         }
 
         case 31: /* ATOMIC: push_group only (no drawing here) */
+            DEBUG_OP(op, "push_group only");
             cairo_push_group(cr);
             break;
 
         case 32: /* ATOMIC: pop_group_to_source only */
+            DEBUG_OP(op, "pop_group_to only");
             cairo_pop_group_to_source(cr);
             cairo_paint_with_alpha(cr, fabs(pick_double(&in,&remaining)));
             break;
@@ -853,6 +1013,105 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             } else {
                 if (img) cairo_surface_destroy(img);
             }
+            break;
+        }
+
+
+        case 51: { // cairo_set_font_matrix
+            cairo_matrix_t M;
+            read_matrix(&M, data, size, size - remaining);
+            // printf("[OP51] cairo_set_font_matrix\n");
+            cairo_set_font_matrix(cr, &M);
+            break;
+        }
+
+        case 52: { // cairo_set_font_face
+            cairo_font_face_t *face = make_font_face(data, size, size - remaining);
+            // printf("[OP52] cairo_set_font_face\n");
+            cairo_set_font_face(cr, face);
+            cairo_font_face_destroy(face);
+            break;
+        }
+
+        case 53: { // cairo_glyph_path
+            int n = 0;
+            cairo_glyph_t *glyphs = make_glyphs(data, size, size - remaining, &n);
+            // printf("[OP53] cairo_glyph_path n=%d\n", n);
+            cairo_glyph_path(cr, glyphs, n);
+            free(glyphs);
+            break;
+        }
+
+        case 54: { // cairo_glyph_extents
+            cairo_text_extents_t extents;
+            int n = 0;
+            cairo_glyph_t *glyphs = make_glyphs(data, size, size - remaining, &n);
+            // printf("[OP54] cairo_glyph_extents n=%d\n", n);
+            cairo_glyph_extents(cr, glyphs, n, &extents);
+            free(glyphs);
+            break;
+        }
+
+        case 55: { // cairo_show_text_glyphs
+            int num_glyphs = 0, num_clusters = 0;
+            cairo_glyph_t *glyphs = make_glyphs(data, size, size - remaining, &num_glyphs);
+            cairo_text_cluster_t *clusters = make_clusters(data, size, size - remaining, &num_clusters);
+            char *utf8 = read_string(data, size, size - remaining, 32);
+
+            cairo_text_cluster_flags_t flags = CAIRO_TEXT_CLUSTER_FLAG_BACKWARD * (data[pos++ % size] & 1);
+
+            // printf("[OP55] cairo_show_text_glyphs ng=%d nc=%d str=\"%s\"\n",
+            //        num_glyphs, num_clusters, utf8);
+
+            cairo_show_text_glyphs(cr,
+                                   utf8, strlen(utf8),
+                                   glyphs, num_glyphs,
+                                   clusters, num_clusters,
+                                   flags);
+
+            free(utf8);
+            free(glyphs);
+            free(clusters);
+            break;
+        }
+
+        case 56: { // cairo_tag_begin
+            char *tag = read_string(data, size, size - remaining, 16);
+            char *attrs = read_string(data, size, size - remaining, 64);
+            // printf("[OP56] cairo_tag_begin tag=\"%s\" attrs=\"%s\"\n", tag, attrs);
+            cairo_tag_begin(cr, tag, attrs);
+            free(tag);
+            free(attrs);
+            break;
+        }
+
+        case 57: { // cairo_tag_end
+            char *tag = read_string(data, size, size - remaining, 16);
+            // printf("[OP57] cairo_tag_end tag=\"%s\"\n", tag);
+            cairo_tag_end(cr, tag);
+            free(tag);
+            break;
+        }
+
+        case 58: { // cairo_clip_extents
+            double x1, y1, x2, y2;
+            cairo_clip_extents(cr, &x1, &y1, &x2, &y2);
+            // printf("[OP58] cairo_clip_extents => [%f %f %f %f]\n", x1, y1, x2, y2);
+            break;
+        }
+
+        case 59: { // cairo_in_clip
+            double x = read_double(data, size, size - remaining);
+            double y = read_double(data, size, size - remaining);
+            cairo_bool_t inside = cairo_in_clip(cr, x, y);
+            // printf("[OP59] cairo_in_clip (%f,%f) => %d\n", x, y, inside);
+            break;
+        }
+
+        case 60: { // cairo_copy_clip_rectangle_list
+            cairo_rectangle_list_t *list = cairo_copy_clip_rectangle_list(cr);
+            // printf("[OP60] rectangles=%d status=%d\n", list->num_rectangles, list->status);
+            cairo_rectangle_list_destroy(list);
             break;
         }
 
